@@ -1,0 +1,272 @@
+# Ingress for fynqAI API
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fynqai-ingress
+  namespace: fynqai
+  labels:
+    app: fynqai
+    component: ingress
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://fynqai.com,https://www.fynqai.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET,POST,PUT,DELETE,OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+    nginx.ingress.kubernetes.io/cors-expose-headers: "Content-Length,Content-Range"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+      more_set_headers "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';";
+spec:
+  tls:
+  - hosts:
+    - fynqai.com
+    - www.fynqai.com
+    secretName: fynqai-tls-secret
+  rules:
+  - host: fynqai.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: fynqai-api
+            port:
+              number: 80
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: fynqai-api
+            port:
+              number: 80
+      - path: /docs
+        pathType: Exact
+        backend:
+          service:
+            name: fynqai-api
+            port:
+              number: 80
+      - path: /redoc
+        pathType: Exact
+        backend:
+          service:
+            name: fynqai-api
+            port:
+              number: 80
+  - host: www.fynqai.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: fynqai-api
+            port:
+              number: 80
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: fynqai-api
+            port:
+              number: 80
+---
+# Certificate for TLS
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fynqai-certificate
+  namespace: fynqai
+  labels:
+    app: fynqai
+    component: tls
+spec:
+  secretName: fynqai-tls-secret
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+  - fynqai.com
+  - www.fynqai.com
+---
+# Network Policy for API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fynqai-api-netpol
+  namespace: fynqai
+  labels:
+    app: fynqai-api
+    component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: fynqai-api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8000
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: fynqai-postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: fynqai-redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+---
+# Network Policy for Workers
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fynqai-worker-netpol
+  namespace: fynqai
+  labels:
+    app: fynqai-worker
+    component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: fynqai-worker
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9540
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: fynqai-postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: fynqai-redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+---
+# Network Policy for Database
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fynqai-postgres-netpol
+  namespace: fynqai
+  labels:
+    app: fynqai-postgres
+    component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: fynqai-postgres
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: fynqai-api
+    - podSelector:
+        matchLabels:
+          app: fynqai-worker
+    - podSelector:
+        matchLabels:
+          app: fynqai-scheduler
+    ports:
+    - protocol: TCP
+      port: 5432
+---
+# Network Policy for Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fynqai-redis-netpol
+  namespace: fynqai
+  labels:
+    app: fynqai-redis
+    component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: fynqai-redis
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: fynqai-api
+    - podSelector:
+        matchLabels:
+          app: fynqai-worker
+    - podSelector:
+        matchLabels:
+          app: fynqai-scheduler
+    ports:
+    - protocol: TCP
+      port: 6379

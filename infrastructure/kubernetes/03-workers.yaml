@@ -1,0 +1,243 @@
+# fynqAI Celery Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fynqai-worker
+  namespace: fynqai
+  labels:
+    app: fynqai-worker
+    component: worker
+    version: v1
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: fynqai-worker
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: fynqai-worker
+        component: worker
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9540"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: fynqai-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: fynqai-worker
+        image: fynqai/backend:latest
+        imagePullPolicy: Always
+        command: ["celery"]
+        args: ["-A", "app.workers.celery_app", "worker", "--loglevel=info", "--concurrency=6", "--prefetch-multiplier=1"]
+        env:
+        - name: DATABASE_URL
+          value: "postgresql+asyncpg://fynqai:$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)"
+        - name: C_FORCE_ROOT
+          value: "1"
+        envFrom:
+        - configMapRef:
+            name: fynqai-config
+        - secretRef:
+            name: fynqai-secrets
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: worker-logs
+          mountPath: /app/logs
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "celery -A app.workers.celery_app inspect ping -d celery@$HOSTNAME"
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+      volumes:
+      - name: worker-logs
+        emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - fynqai-worker
+              topologyKey: kubernetes.io/hostname
+---
+# fynqAI Celery Beat Scheduler Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fynqai-scheduler
+  namespace: fynqai
+  labels:
+    app: fynqai-scheduler
+    component: scheduler
+    version: v1
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: fynqai-scheduler
+      component: scheduler
+  template:
+    metadata:
+      labels:
+        app: fynqai-scheduler
+        component: scheduler
+        version: v1
+    spec:
+      serviceAccountName: fynqai-scheduler
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: fynqai-scheduler
+        image: fynqai/backend:latest
+        imagePullPolicy: Always
+        command: ["celery"]
+        args: ["-A", "app.workers.celery_app", "beat", "--loglevel=info"]
+        env:
+        - name: DATABASE_URL
+          value: "postgresql+asyncpg://fynqai:$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)"
+        - name: C_FORCE_ROOT
+          value: "1"
+        envFrom:
+        - configMapRef:
+            name: fynqai-config
+        - secretRef:
+            name: fynqai-secrets
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: scheduler-logs
+          mountPath: /app/logs
+        - name: celery-beat-schedule
+          mountPath: /app/celerybeat-schedule
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: scheduler-logs
+        emptyDir: {}
+      - name: celery-beat-schedule
+        emptyDir: {}
+---
+# ServiceAccount for Worker
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fynqai-worker
+  namespace: fynqai
+  labels:
+    app: fynqai-worker
+    component: worker
+---
+# ServiceAccount for Scheduler
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fynqai-scheduler
+  namespace: fynqai
+  labels:
+    app: fynqai-scheduler
+    component: scheduler
+---
+# HorizontalPodAutoscaler for Workers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fynqai-worker-hpa
+  namespace: fynqai
+  labels:
+    app: fynqai-worker
+    component: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fynqai-worker
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 75
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 85
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+---
+# PodDisruptionBudget for Workers
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fynqai-worker-pdb
+  namespace: fynqai
+  labels:
+    app: fynqai-worker
+    component: worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fynqai-worker
+      component: worker

@@ -1,0 +1,241 @@
+# Production Docker Compose for fynqAI
+version: '3.8'
+
+services:
+  # Main API service with high availability
+  fynqai-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: production
+    image: fynqai/backend:latest
+    deploy:
+      replicas: 3
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    environment:
+      - ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_ENVIRONMENT=${PINECONE_ENVIRONMENT}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000-8002:8000"
+    volumes:
+      - app_logs:/app/logs
+    networks:
+      - fynqai-production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Celery worker cluster
+  fynqai-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: production
+    image: fynqai/backend:latest
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=6 --prefetch-multiplier=1
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    environment:
+      - ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_ENVIRONMENT=${PINECONE_ENVIRONMENT}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - LOG_LEVEL=INFO
+    volumes:
+      - worker_logs:/app/logs
+    networks:
+      - fynqai-production
+    restart: unless-stopped
+
+  # Celery Beat scheduler (single instance)
+  fynqai-scheduler:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: production
+    image: fynqai/backend:latest
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    environment:
+      - ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - LOG_LEVEL=INFO
+    volumes:
+      - scheduler_logs:/app/logs
+    networks:
+      - fynqai-production
+    restart: unless-stopped
+
+  # Load balancer with HAProxy
+  haproxy:
+    image: haproxy:2.8-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8404:8404"  # HAProxy stats
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./ssl:/etc/ssl/certs:ro
+    depends_on:
+      - fynqai-api
+    networks:
+      - fynqai-production
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+
+  # Redis Sentinel for high availability
+  redis-sentinel:
+    image: redis:7-alpine
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf:ro
+    networks:
+      - fynqai-production
+    deploy:
+      replicas: 3
+      restart_policy:
+        condition: on-failure
+
+  # Monitoring stack
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus-prod.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - fynqai-production
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_SECRET_KEY=${GRAFANA_SECRET_KEY}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/production:/etc/grafana/provisioning
+    networks:
+      - fynqai-production
+    restart: unless-stopped
+
+  # Log aggregation with Loki
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    networks:
+      - fynqai-production
+    restart: unless-stopped
+
+  # Log shipping with Promtail
+  promtail:
+    image: grafana/promtail:latest
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/config.yml:ro
+      - app_logs:/var/log/app:ro
+      - worker_logs:/var/log/worker:ro
+      - scheduler_logs:/var/log/scheduler:ro
+    networks:
+      - fynqai-production
+    restart: unless-stopped
+    deploy:
+      mode: global
+
+volumes:
+  app_logs:
+    driver: local
+  worker_logs:
+    driver: local
+  scheduler_logs:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+
+networks:
+  fynqai-production:
+    driver: overlay
+    attachable: true
+    ipam:
+      config:
+        - subnet: 10.0.0.0/16

@@ -1,0 +1,229 @@
+# fynqAI Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fynqai
+  labels:
+    name: fynqai
+    environment: production
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fynqai-config
+  namespace: fynqai
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  REDIS_URL: "redis://fynqai-redis:6379/0"
+  CELERY_BROKER_URL: "redis://fynqai-redis:6379/1"
+  DATABASE_HOST: "fynqai-postgres"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "fynqai"
+---
+# Secret for sensitive configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fynqai-secrets
+  namespace: fynqai
+type: Opaque
+data:
+  # Base64 encoded secrets (replace with actual values)
+  DATABASE_PASSWORD: Zm55cWFpMTIz  # fynqai123
+  JWT_SECRET_KEY: c3VwZXItc2VjcmV0LWp3dC1rZXk=  # super-secret-jwt-key
+  OPENAI_API_KEY: ""  # Add actual API key
+  ANTHROPIC_API_KEY: ""  # Add actual API key
+  GEMINI_API_KEY: ""  # Add actual API key
+  MISTRAL_API_KEY: ""  # Add actual API key
+  PINECONE_API_KEY: ""  # Add actual API key
+  SUPABASE_KEY: ""  # Add actual Supabase key
+  SENTRY_DSN: ""  # Add actual Sentry DSN
+---
+# PersistentVolumeClaim for PostgreSQL data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: fynqai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: fast-ssd
+---
+# PersistentVolumeClaim for Redis data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: fynqai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: fast-ssd
+---
+# PostgreSQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fynqai-postgres
+  namespace: fynqai
+  labels:
+    app: fynqai-postgres
+    component: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fynqai-postgres
+  template:
+    metadata:
+      labels:
+        app: fynqai-postgres
+        component: database
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: fynqai-config
+              key: DATABASE_NAME
+        - name: POSTGRES_USER
+          value: "fynqai"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: fynqai-secrets
+              key: DATABASE_PASSWORD
+        - name: PGDATA
+          value: "/var/lib/postgresql/data/pgdata"
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U fynqai -d fynqai
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - pg_isready -U fynqai -d fynqai
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fynqai-postgres
+  namespace: fynqai
+  labels:
+    app: fynqai-postgres
+    component: database
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+  selector:
+    app: fynqai-postgres
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fynqai-redis
+  namespace: fynqai
+  labels:
+    app: fynqai-redis
+    component: cache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fynqai-redis
+  template:
+    metadata:
+      labels:
+        app: fynqai-redis
+        component: cache
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        volumeMounts:
+        - name: redis-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: redis-storage
+        persistentVolumeClaim:
+          claimName: redis-pvc
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fynqai-redis
+  namespace: fynqai
+  labels:
+    app: fynqai-redis
+    component: cache
+spec:
+  ports:
+  - port: 6379
+    targetPort: 6379
+    protocol: TCP
+  selector:
+    app: fynqai-redis

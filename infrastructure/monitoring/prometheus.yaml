@@ -1,0 +1,316 @@
+# Prometheus monitoring stack for fynqAI
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+---
+# ServiceMonitor for fynqAI API
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fynqai-api-metrics
+  namespace: monitoring
+  labels:
+    app: fynqai-api
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: fynqai-api
+  namespaceSelector:
+    matchNames:
+    - fynqai
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+---
+# ServiceMonitor for fynqAI Workers
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fynqai-worker-metrics
+  namespace: monitoring
+  labels:
+    app: fynqai-worker
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: fynqai-worker
+  namespaceSelector:
+    matchNames:
+    - fynqai
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+---
+# PrometheusRule for fynqAI alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fynqai-alerts
+  namespace: monitoring
+  labels:
+    app: fynqai
+    component: alerting
+spec:
+  groups:
+  - name: fynqai.api
+    rules:
+    - alert: FynqAIAPIDown
+      expr: up{job="fynqai-api"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        service: fynqai-api
+      annotations:
+        summary: "fynqAI API is down"
+        description: "fynqAI API has been down for more than 5 minutes"
+    
+    - alert: FynqAIAPIHighLatency
+      expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="fynqai-api"}[5m])) > 2
+      for: 10m
+      labels:
+        severity: warning
+        service: fynqai-api
+      annotations:
+        summary: "fynqAI API high latency"
+        description: "95th percentile latency is above 2 seconds for 10 minutes"
+    
+    - alert: FynqAIAPIHighErrorRate
+      expr: rate(http_requests_total{job="fynqai-api",status=~"5.."}[5m]) / rate(http_requests_total{job="fynqai-api"}[5m]) > 0.05
+      for: 5m
+      labels:
+        severity: warning
+        service: fynqai-api
+      annotations:
+        summary: "fynqAI API high error rate"
+        description: "Error rate is above 5% for 5 minutes"
+    
+    - alert: FynqAIAPIHighMemoryUsage
+      expr: (container_memory_usage_bytes{pod=~"fynqai-api-.*"} / container_spec_memory_limit_bytes{pod=~"fynqai-api-.*"}) > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        service: fynqai-api
+      annotations:
+        summary: "fynqAI API high memory usage"
+        description: "Memory usage is above 90% for 10 minutes"
+    
+    - alert: FynqAIAPICPUUsage
+      expr: (rate(container_cpu_usage_seconds_total{pod=~"fynqai-api-.*"}[5m]) * 100) > 80
+      for: 15m
+      labels:
+        severity: warning
+        service: fynqai-api
+      annotations:
+        summary: "fynqAI API high CPU usage"
+        description: "CPU usage is above 80% for 15 minutes"
+
+  - name: fynqai.workers
+    rules:
+    - alert: FynqAIWorkersDown
+      expr: up{job="fynqai-worker"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        service: fynqai-worker
+      annotations:
+        summary: "fynqAI workers are down"
+        description: "fynqAI workers have been down for more than 5 minutes"
+    
+    - alert: FynqAIWorkerHighQueueLength
+      expr: celery_queue_length{job="fynqai-worker"} > 100
+      for: 10m
+      labels:
+        severity: warning
+        service: fynqai-worker
+      annotations:
+        summary: "fynqAI worker queue length is high"
+        description: "Celery queue length is above 100 for 10 minutes"
+    
+    - alert: FynqAIWorkerTaskFailureRate
+      expr: rate(celery_task_failed_total{job="fynqai-worker"}[10m]) / rate(celery_task_total{job="fynqai-worker"}[10m]) > 0.1
+      for: 10m
+      labels:
+        severity: warning
+        service: fynqai-worker
+      annotations:
+        summary: "fynqAI worker task failure rate is high"
+        description: "Task failure rate is above 10% for 10 minutes"
+
+  - name: fynqai.database
+    rules:
+    - alert: FynqAIPostgreSQLDown
+      expr: up{job="fynqai-postgres"} == 0
+      for: 2m
+      labels:
+        severity: critical
+        service: fynqai-postgres
+      annotations:
+        summary: "fynqAI PostgreSQL is down"
+        description: "PostgreSQL database has been down for more than 2 minutes"
+    
+    - alert: FynqAIPostgreSQLHighConnections
+      expr: (pg_stat_database_numbackends{job="fynqai-postgres"} / on() pg_settings_max_connections{job="fynqai-postgres"}) > 0.8
+      for: 10m
+      labels:
+        severity: warning
+        service: fynqai-postgres
+      annotations:
+        summary: "fynqAI PostgreSQL high connection usage"
+        description: "Connection usage is above 80% for 10 minutes"
+    
+    - alert: FynqAIRedisDown
+      expr: up{job="fynqai-redis"} == 0
+      for: 2m
+      labels:
+        severity: critical
+        service: fynqai-redis
+      annotations:
+        summary: "fynqAI Redis is down"
+        description: "Redis cache has been down for more than 2 minutes"
+    
+    - alert: FynqAIRedisHighMemoryUsage
+      expr: (redis_memory_used_bytes{job="fynqai-redis"} / redis_config_maxmemory{job="fynqai-redis"}) > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        service: fynqai-redis
+      annotations:
+        summary: "fynqAI Redis high memory usage"
+        description: "Redis memory usage is above 90% for 10 minutes"
+
+  - name: fynqai.business
+    rules:
+    - alert: FynqAILowDoubtProcessingRate
+      expr: rate(doubts_processed_total{job="fynqai-api"}[10m]) < 0.017
+      for: 30m
+      labels:
+        severity: warning
+        service: fynqai-doubts
+      annotations:
+        summary: "fynqAI doubt processing rate is low"
+        description: "Doubt processing rate is below 1 per minute for 30 minutes"
+    
+    - alert: FynqAIHighDoubtProcessingLatency
+      expr: histogram_quantile(0.95, rate(doubt_processing_duration_seconds_bucket{job="fynqai-api"}[10m])) > 300
+      for: 15m
+      labels:
+        severity: warning
+        service: fynqai-doubts
+      annotations:
+        summary: "fynqAI doubt processing latency is high"
+        description: "95th percentile doubt processing time is above 5 minutes"
+    
+    - alert: FynqAILLMAPIErrors
+      expr: rate(llm_api_errors_total{job="fynqai-api"}[5m]) > 0.1
+      for: 10m
+      labels:
+        severity: warning
+        service: fynqai-llm
+      annotations:
+        summary: "fynqAI LLM API errors are high"
+        description: "LLM API error rate is above 0.1 per second for 10 minutes"
+---
+# Grafana Dashboard ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fynqai-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  fynqai-overview.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "fynqAI Backend Overview",
+        "tags": ["fynqai", "backend"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "API Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{job=\"fynqai-api\"}[5m])",
+                "legendFormat": "{{method}} {{status}}"
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "title": "API Response Time",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"fynqai-api\"}[5m]))",
+                "legendFormat": "95th percentile"
+              },
+              {
+                "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"fynqai-api\"}[5m]))",
+                "legendFormat": "50th percentile"
+              }
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Database Connections",
+            "type": "singlestat",
+            "targets": [
+              {
+                "expr": "pg_stat_database_numbackends{job=\"fynqai-postgres\"}",
+                "legendFormat": "Active Connections"
+              }
+            ]
+          },
+          {
+            "id": 4,
+            "title": "Celery Queue Length",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "celery_queue_length{job=\"fynqai-worker\"}",
+                "legendFormat": "{{queue}}"
+              }
+            ]
+          },
+          {
+            "id": 5,
+            "title": "Memory Usage",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "container_memory_usage_bytes{pod=~\"fynqai-.*\"}",
+                "legendFormat": "{{pod}}"
+              }
+            ]
+          },
+          {
+            "id": 6,
+            "title": "CPU Usage",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(container_cpu_usage_seconds_total{pod=~\"fynqai-.*\"}[5m])",
+                "legendFormat": "{{pod}}"
+              }
+            ]
+          }
+        ],
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }
